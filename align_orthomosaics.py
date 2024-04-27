@@ -32,6 +32,7 @@ class AlignOrthomosaics:
         self.save_orthomosaics_as_arrays()
         self.save_orthomosaics_as_tiffs()
         self.upsample_tiffs()
+        self.save_upsampled_orthomosaics_as_arrays()
         self.save_constants()
 
     def get_orthomosaic(self, modality, tiff):
@@ -123,6 +124,7 @@ class AlignOrthomosaics:
 
         for modality in self.modalities:
             self.array_to_tiff(modality)
+
         print(f'Orthomosaics saved as tiffs')
 
     def upsample_tiffs(self):
@@ -131,19 +133,29 @@ class AlignOrthomosaics:
 
         for modality in self.modalities:
             if self.data[modality]['res_x'] == max_res:
-                shutil.copy(f'{self.site_dir}/aligned_tiffs/{modality}.tif', f'{self.site_dir}/upsampled_tiffs/{modality}.tif')
+                shutil.copy(f'{self.site_dir}/aligned_tiffs/{modality}.tif', f'{self.site_dir}/upsampled_tiffs/{modality}_upsampled.tif')
             else:
-                gdal.Warp(destNameOrDestDS=f'{self.site_dir}/upsampled_tiffs/{modality}.tif',
+                gdal.Warp(destNameOrDestDS=f'{self.site_dir}/upsampled_tiffs/{modality}_upsampled.tif',
                           srcDSOrSrcDSTab=f'{self.site_dir}/aligned_tiffs/{modality}.tif',
                           xRes=max_res,
                           yRes=max_res,
                           resampleAlg='cubic',
                           srcNodata=0,
-                          dstNodata=0)        
+                          dstNodata=0)
 
-            with rasterio.open(f'{self.site_dir}/upsampled_tiffs/{modality}.tif') as tiff:
+            with rasterio.open(f'{self.site_dir}/upsampled_tiffs/{modality}_upsampled.tif') as tiff:
                 print(f'Upsampled {modality} tiff shape = {tiff.read().shape}')
                 print(f'Upsampled {modality} tiff resolution = {tiff.res}')
+
+    def save_upsampled_orthomosaics_as_arrays(self):
+        os.makedirs(f'{self.site_dir}/upsampled_orthomosaics', exist_ok=True)
+
+        for modality in self.modalities:
+            with rasterio.open(f'{self.site_dir}/upsampled_tiffs/{modality}_upsampled.tif') as tiff:
+                upsampled_orthomosaic = tiff.read(1) if tiff.count == 1 else tiff.read().transpose(1, 2, 0)
+                np.save(f'{self.site_dir}/upsampled_orthomosaics/{modality}_upsampled_orthomosaic', upsampled_orthomosaic)
+
+        print(f'Upsampled orthomosaics saved as numpy arrays')
 
     def save_constants(self):
         with open('constants.yaml', 'w') as yaml_file:
