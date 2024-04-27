@@ -1,7 +1,9 @@
 # imports
+from osgeo import gdal
 import numpy as np
 import os
 import rasterio
+import shutil
 import sys
 import utils
 import yaml
@@ -10,143 +12,104 @@ class AlignOrthomosaics:
     def __init__(self, site):
         self.site_dir = utils.get_site_dir(site)
         self.interval_meters = 20
+        self.modalities = ['thermal', 'rgb', 'lidar']
+        self.data = {}
 
-        with rasterio.open(f'{self.site_dir}/tiffs/thermal.tif') as thermal_tiff:
-            thermal_tiff_metadata = thermal_tiff.meta
-            self.thermal_res_x, _, self.thermal_left_meters, _, self.thermal_res_y, self.thermal_top_meters, _, _, _ = thermal_tiff.transform
-            self.thermal_band = self.get_thermal_band(thermal_tiff)
-            print(f'Initial thermal band shape = {self.thermal_band.shape}')
+        for modality in self.modalities:
+            self.data[modality] = {}
 
-        with rasterio.open(f'{self.site_dir}/tiffs/rgb.tif') as rgb_tiff:
-            rgb_tiff_metadata = rgb_tiff.meta
-            self.rgb_res_x, _, self.rgb_left_meters, _, self.rgb_res_y, self.rgb_top_meters, _, _, _ = rgb_tiff.transform
-            self.rgb_bands = self.get_rgb_bands(rgb_tiff)
-            print(f'Initial RGB bands shape = {self.rgb_bands.shape}')
+            with rasterio.open(f'{self.site_dir}/tiffs/{modality}.tif') as tiff:
+                self.data[modality]['res_x'], _, self.data[modality]['left_meters'], _, self.data[modality]['res_y'], self.data[modality]['top_meters'], _, _, _ = tiff.transform
+                self.data[modality]['res_x'], self.data[modality]['res_y'] = round(self.data[modality]['res_x'], 2), round(self.data[modality]['res_y'], 2)
+                self.data[modality]['metadata'] = tiff.meta
+                self.data[modality]['orthomosaic'] = self.get_orthomosaic(modality, tiff)
+                self.data[modality]['interval'] = int(self.interval_meters / self.data[modality]['res_x'])
+                print(f'Initial {modality} orthomosaic shape = {self.data[modality]["orthomosaic"].shape}')
 
-        with rasterio.open(f'{self.site_dir}/tiffs/lidar.tif') as lidar_tiff:
-            lidar_tiff_metadata = lidar_tiff.meta
-            self.lidar_res_x, _, self.lidar_left_meters, _, self.lidar_res_y, self.lidar_top_meters, _, _, _ = lidar_tiff.transform
-            self.lidar_res_x = round(self.lidar_res_x, 2)
-            self.lidar_res_y = round(self.lidar_res_y, 2)
-            self.lidar_band = self.get_lidar_band(lidar_tiff)
-            print(f'Initial LiDAR band shape = {self.lidar_band.shape}')
-
-        self.thermal_interval = int(self.interval_meters / self.thermal_res_x)
-        self.rgb_interval = int(self.interval_meters / self.rgb_res_x)
-        self.lidar_interval = int(self.interval_meters / self.lidar_res_x)
-
-        self.tight_bound_top_meters, self.tight_bound_bottom_meters, self.tight_bound_left_meters, self.tight_bound_right_meters = self.get_tight_bounds()
-
+        self.tight_bounds_meters = self.get_tight_bounds_meters()
         self.crop_to_tight_bounds()
-        print(f'Post-cropping thermal band shape = {self.thermal_band.shape}')
-        print(f'Post-cropping RGB bands shape = {self.rgb_bands.shape}')
-        print(f'Post-cropping LiDAR band shape = {self.lidar_band.shape}')
-
         self.pad_for_divisibility_by_interval()
-        print(f'Post-padding thermal band shape = {self.thermal_band.shape}')
-        print(f'Post-padding RGB bands shape = {self.rgb_bands.shape}')
-        print(f'Post-padding LiDAR band shape = {self.lidar_band.shape}')
+        self.save_orthomosaics_as_arrays()
+        self.save_orthomosaics_as_tiffs()
+        self.upsample_tiffs()
+        self.save_constants()
 
-        # save bands
-        os.makedirs(f'{self.site_dir}/bands', exist_ok=True)
-        np.save(f'{self.site_dir}/bands/thermal_band', self.thermal_band)
-        print('Thermal band saved as numpy array')
-        np.save(f'{self.site_dir}/bands/rgb_bands', self.rgb_bands)
-        print('RGB bands saved as numpy array')
-        np.save(f'{self.site_dir}/bands/lidar_band', self.lidar_band)
-        print('LiDAR band saved as numpy array')
+    def get_orthomosaic(self, modality, tiff):
+        if modality == 'thermal':
+            orthomosaic = tiff.read(4) # 4th band holds the thermal data
+            background_value = 2000 # the thermal data is above the background value
+            orthomosaic[orthomosaic <= background_value] = 0 # sets all background pixels to 0
+            min_non_background_value = np.min(orthomosaic[orthomosaic > 0])
+            orthomosaic[orthomosaic > 0] -= min_non_background_value-1 # downshifts the thermal values such that their minimum is 1
+        elif modality == 'rgb':
+            orthomosaic = tiff.read().transpose(1, 2, 0)
+        elif modality == 'lidar':
+            orthomosaic = tiff.read(1)
+            orthomosaic[orthomosaic < 0] = 0
 
-        # save bands as tiffs
-        self.array_to_tiff(self.thermal_band, thermal_tiff_metadata, [self.thermal_res_x, self.thermal_res_y], 'thermal')
-        self.array_to_tiff(self.rgb_bands, rgb_tiff_metadata, [self.rgb_res_x, self.rgb_res_y], 'rgb')
-        self.array_to_tiff(self.lidar_band, lidar_tiff_metadata, [self.lidar_res_x, self.lidar_res_y], 'lidar')
-        print('Bands saved as tiffs')
+        return orthomosaic
 
-        # save constants
-        with open('constants.yaml', 'w') as yaml_file:
-            yaml.dump({'thermal_res_x': self.thermal_res_x, 'thermal_res_y': self.thermal_res_y, 'thermal_interval': self.thermal_interval,
-                       'rgb_res_x': self.rgb_res_x, 'rgb_res_y': self.rgb_res_y, 'rgb_interval': self.rgb_interval,
-                       'lidar_res_x': self.lidar_res_x, 'lidar_res_y': self.lidar_res_y, 'lidar_interval': self.lidar_interval,
-                       'num_cols_in_tiling': int(self.thermal_band.shape[1]/self.thermal_interval)},
-                      yaml_file,
-                      default_flow_style=False)
-        print('Constants saved as YAML')
+    def get_tight_bounds_meters(self):
+        nonzero_bounds = {'pixels': {}, 'meters': {}}
 
-    def get_thermal_band(self, thermal_tiff):
-        thermal_band = thermal_tiff.read(4) # 4th band holds the thermal data
-        background_value = 2000 # the thermal data is above the background value
-        thermal_band[thermal_band <= background_value] = 0 # sets all background pixels to 0
-        min_non_background_value = np.min(thermal_band[thermal_band > 0])
-        thermal_band[thermal_band > 0] -= min_non_background_value-1 # downshifts the thermal values such that their minimum is 1
+        for modality in self.modalities:
+            nonzero_bounds['pixels'][modality] = {}
+            nonzero_bounds['pixels'][modality]['top'], nonzero_bounds['pixels'][modality]['bottom'], nonzero_bounds['pixels'][modality]['left'], nonzero_bounds['pixels'][modality]['right'] = utils.get_nonzero_bounds(array=self.data[modality]['orthomosaic'])
 
-        return thermal_band
+            nonzero_bounds['meters'][modality] = {}
+            nonzero_bounds['meters'][modality]['top'], nonzero_bounds['meters'][modality]['bottom'], nonzero_bounds['meters'][modality]['left'], nonzero_bounds['meters'][modality]['right'] = utils.get_bounds_meters(bounds_pixels=[nonzero_bounds['pixels'][modality]['top'],
+                                                                                                                                                                                                                                      nonzero_bounds['pixels'][modality]['bottom'],
+                                                                                                                                                                                                                                      nonzero_bounds['pixels'][modality]['left'],
+                                                                                                                                                                                                                                      nonzero_bounds['pixels'][modality]['right']],
+                                                                                                                                                                                                                       origin=[self.data[modality]['left_meters'], self.data[modality]['top_meters']],
+                                                                                                                                                                                                                       res=[self.data[modality]['res_x'], self.data[modality]['res_y']])        
+        
+        tight_bounds_meters = {'top': np.min([nonzero_bounds['meters'][modality]['top'] for modality in self.modalities]),
+                               'bottom': np.max([nonzero_bounds['meters'][modality]['bottom'] for modality in self.modalities]),
+                               'left': np.max([nonzero_bounds['meters'][modality]['left'] for modality in self.modalities]),
+                               'right': np.min([nonzero_bounds['meters'][modality]['right'] for modality in self.modalities])}
 
-    def get_rgb_bands(self, rgb_tiff):
-        rgb_bands = rgb_tiff.read().transpose(1, 2, 0)
-
-        return rgb_bands
-
-    def get_lidar_band(self, lidar_tiff):
-        lidar_band = lidar_tiff.read(1)
-        lidar_band[lidar_band < 0] = 0
-
-        return lidar_band
-
-    def get_tight_bounds(self):
-        # nonzero bounds in pixels
-        thermal_bound_top_pixels, thermal_bound_bottom_pixels, thermal_bound_left_pixels, thermal_bound_right_pixels = utils.get_nonzero_bounds(array=self.thermal_band)
-        rgb_bound_top_pixels, rgb_bound_bottom_pixels, rgb_bound_left_pixels, rgb_bound_right_pixels = utils.get_nonzero_bounds(array=self.rgb_bands)
-        lidar_bound_top_pixels, lidar_bound_bottom_pixels, lidar_bound_left_pixels, lidar_bound_right_pixels = utils.get_nonzero_bounds(array=self.lidar_band)
-
-        # nonzero bounds in meters
-        thermal_bound_top_meters, thermal_bound_bottom_meters, thermal_bound_left_meters, thermal_bound_right_meters = utils.get_bounds_meters(bounds_pixels=[thermal_bound_top_pixels, thermal_bound_bottom_pixels, thermal_bound_left_pixels, thermal_bound_right_pixels],
-                                                                                                                                               origin=[self.thermal_left_meters, self.thermal_top_meters],
-                                                                                                                                               res=[self.thermal_res_x, self.thermal_res_y])
-        rgb_bound_top_meters, rgb_bound_bottom_meters, rgb_bound_left_meters, rgb_bound_right_meters = utils.get_bounds_meters(bounds_pixels=[rgb_bound_top_pixels, rgb_bound_bottom_pixels, rgb_bound_left_pixels, rgb_bound_right_pixels],
-                                                                                                                               origin=[self.rgb_left_meters, self.rgb_top_meters],
-                                                                                                                               res=[self.rgb_res_x, self.rgb_res_y])
-        lidar_bound_top_meters, lidar_bound_bottom_meters, lidar_bound_left_meters, lidar_bound_right_meters = utils.get_bounds_meters(bounds_pixels=[lidar_bound_top_pixels, lidar_bound_bottom_pixels, lidar_bound_left_pixels, lidar_bound_right_pixels],
-                                                                                                                                       origin=[self.lidar_left_meters, self.lidar_top_meters],
-                                                                                                                                       res=[self.lidar_res_x, self.lidar_res_y])
-        # tight bounds in meters
-        tight_bound_top_meters = np.min([thermal_bound_top_meters, rgb_bound_top_meters, lidar_bound_top_meters])
-        tight_bound_bottom_meters = np.max([thermal_bound_bottom_meters, rgb_bound_bottom_meters, lidar_bound_bottom_meters])
-        tight_bound_left_meters = np.max([thermal_bound_left_meters, rgb_bound_left_meters, lidar_bound_left_meters])
-        tight_bound_right_meters = np.min([thermal_bound_right_meters, rgb_bound_right_meters, lidar_bound_right_meters])
-
-        return tight_bound_top_meters, tight_bound_bottom_meters, tight_bound_left_meters, tight_bound_right_meters
+        return tight_bounds_meters
 
     def crop_to_tight_bounds(self):
-        # tight bounds in pixels
-        thermal_tight_bound_top_pixels, thermal_tight_bound_bottom_pixels, thermal_tight_bound_left_pixels, thermal_tight_bound_right_pixels = utils.get_bounds_pixels(bounds_meters=[self.tight_bound_top_meters, self.tight_bound_bottom_meters, self.tight_bound_left_meters, self.tight_bound_right_meters],
-                                                                                                                                               origin=[self.thermal_left_meters, self.thermal_top_meters],
-                                                                                                                                               res=[self.thermal_res_x, self.thermal_res_y])
-        rgb_tight_bound_top_pixels, rgb_tight_bound_bottom_pixels, rgb_tight_bound_left_pixels, rgb_tight_bound_right_pixels = utils.get_bounds_pixels(bounds_meters=[self.tight_bound_top_meters, self.tight_bound_bottom_meters, self.tight_bound_left_meters, self.tight_bound_right_meters],
-                                                                                                                                                       origin=[self.rgb_left_meters, self.rgb_top_meters],
-                                                                                                                                                       res=[self.rgb_res_x, self.rgb_res_y])
-        lidar_tight_bound_top_pixels, lidar_tight_bound_bottom_pixels, lidar_tight_bound_left_pixels, lidar_tight_bound_right_pixels = utils.get_bounds_pixels(bounds_meters=[self.tight_bound_top_meters, self.tight_bound_bottom_meters, self.tight_bound_left_meters, self.tight_bound_right_meters],
-                                                                                                                                                               origin=[self.lidar_left_meters, self.lidar_top_meters],
-                                                                                                                                                               res=[self.lidar_res_x, self.lidar_res_y])
+        tight_bounds_pixels = {}
 
-        # crop to tight bounds
-        self.thermal_band = self.thermal_band[thermal_tight_bound_top_pixels : thermal_tight_bound_bottom_pixels, thermal_tight_bound_left_pixels : thermal_tight_bound_right_pixels]
-        self.rgb_bands = self.rgb_bands[rgb_tight_bound_top_pixels : rgb_tight_bound_bottom_pixels, rgb_tight_bound_left_pixels : rgb_tight_bound_right_pixels]
-        self.lidar_band = self.lidar_band[lidar_tight_bound_top_pixels : lidar_tight_bound_bottom_pixels, lidar_tight_bound_left_pixels : lidar_tight_bound_right_pixels]
+        for modality in self.modalities:
+            tight_bounds_pixels[modality] = {}
+            tight_bounds_pixels[modality]['top'], tight_bounds_pixels[modality]['bottom'], tight_bounds_pixels[modality]['left'], tight_bounds_pixels[modality]['right'] = utils.get_bounds_pixels(bounds_meters=[self.tight_bounds_meters['top'],
+                                                                                                                                                                                                                  self.tight_bounds_meters['bottom'],
+                                                                                                                                                                                                                  self.tight_bounds_meters['left'],
+                                                                                                                                                                                                                  self.tight_bounds_meters['right']],
+                                                                                                                                                                                                   origin=[self.data[modality]['left_meters'], self.data[modality]['top_meters']],
+                                                                                                                                                                                                   res=[self.data[modality]['res_x'], self.data[modality]['res_y']])
+            self.data[modality]['orthomosaic'] = self.data[modality]['orthomosaic'][tight_bounds_pixels[modality]['top'] : tight_bounds_pixels[modality]['bottom'], tight_bounds_pixels[modality]['left'] : tight_bounds_pixels[modality]['right']]
+            print(f'Post-cropping {modality} orthomosaic shape = {self.data[modality]["orthomosaic"].shape}')
 
     def pad_for_divisibility_by_interval(self):
-        self.thermal_band = np.pad(array=self.thermal_band, pad_width=((0, self.thermal_interval - self.thermal_band.shape[0]%self.thermal_interval), (0, self.thermal_interval - self.thermal_band.shape[1]%self.thermal_interval)))
-        self.rgb_bands = np.pad(array=self.rgb_bands, pad_width=((0, self.rgb_interval - self.rgb_bands.shape[0]%self.rgb_interval), (0, self.rgb_interval - self.rgb_bands.shape[1]%self.rgb_interval), (0, 0)))
-        self.lidar_band = np.pad(array=self.lidar_band, pad_width=((0, self.lidar_interval - self.lidar_band.shape[0]%self.lidar_interval), (0, self.lidar_interval - self.lidar_band.shape[1]%self.lidar_interval)))
+        for modality in self.modalities:
+            if len(self.data[modality]['orthomosaic'].shape) == 2:
+                pad_width = ((0, self.data[modality]['interval'] - self.data[modality]['orthomosaic'].shape[0]%self.data[modality]['interval']), (0, self.data[modality]['interval'] - self.data[modality]['orthomosaic'].shape[1]%self.data[modality]['interval']))
+            else:
+                pad_width = ((0, self.data[modality]['interval'] - self.data[modality]['orthomosaic'].shape[0]%self.data[modality]['interval']), (0, self.data[modality]['interval'] - self.data[modality]['orthomosaic'].shape[1]%self.data[modality]['interval']), (0,0))
 
-    def array_to_tiff(self, array, original_metadata, res, modality):
-        metadata = original_metadata.copy()
+            self.data[modality]['orthomosaic'] = np.pad(array=self.data[modality]['orthomosaic'], pad_width=pad_width)
+            print(f'Post-padding {modality} orthomosaic shape = {self.data[modality]["orthomosaic"].shape}')
+
+    def save_orthomosaics_as_arrays(self):
+        os.makedirs(f'{self.site_dir}/orthomosaics', exist_ok=True)
+
+        for modality in self.modalities:
+            np.save(f'{self.site_dir}/orthomosaics/{modality}_orthomosaic', self.data[modality]['orthomosaic'])
+        print(f'Orthomosaics saved as numpy arrays')
+
+    def array_to_tiff(self, modality):
+        metadata = self.data[modality]['metadata'].copy()
+        array = self.data[modality]['orthomosaic']
         metadata['nodata'] = 0
         metadata['width'] = array.shape[1]
         metadata['height'] = array.shape[0]
         metadata['count'] = 1 if len(array.shape) == 2 else 3
-        metadata['transform'] = rasterio.transform.Affine(res[0], 0.0, self.tight_bound_left_meters, 0.0, res[1], self.tight_bound_top_meters)
-
-        os.makedirs(f'{self.site_dir}/aligned_tiffs', exist_ok=True)
+        metadata['transform'] = rasterio.transform.Affine(self.data[modality]['res_x'], 0.0, self.tight_bounds_meters['left'], 0.0, self.data[modality]['res_y'], self.tight_bounds_meters['top'])
 
         with rasterio.open(f'{self.site_dir}/aligned_tiffs/{modality}.tif', 'w', **metadata) as tiff_file:
             if len(array.shape) == 2:
@@ -154,6 +117,43 @@ class AlignOrthomosaics:
             elif len(array.shape) == 3:
                 for i, band in enumerate(array.transpose(2, 0, 1)):
                     tiff_file.write(band, i+1)
+
+    def save_orthomosaics_as_tiffs(self):
+        os.makedirs(f'{self.site_dir}/aligned_tiffs', exist_ok=True)
+
+        for modality in self.modalities:
+            self.array_to_tiff(modality)
+        print(f'Orthomosaics saved as tiffs')
+
+    def upsample_tiffs(self):
+        os.makedirs(f'{self.site_dir}/upsampled_tiffs', exist_ok=True)
+        max_res = np.min([self.data[modality]['res_x'] for modality in self.modalities])
+
+        for modality in self.modalities:
+            if self.data[modality]['res_x'] == max_res:
+                shutil.copy(f'{self.site_dir}/aligned_tiffs/{modality}.tif', f'{self.site_dir}/upsampled_tiffs/{modality}.tif')
+            else:
+                gdal.Warp(destNameOrDestDS=f'{self.site_dir}/upsampled_tiffs/{modality}.tif',
+                          srcDSOrSrcDSTab=f'{self.site_dir}/aligned_tiffs/{modality}.tif',
+                          xRes=max_res,
+                          yRes=max_res,
+                          resampleAlg='cubic',
+                          srcNodata=0,
+                          dstNodata=0)        
+
+            with rasterio.open(f'{self.site_dir}/upsampled_tiffs/{modality}.tif') as tiff:
+                print(f'Upsampled {modality} tiff shape = {tiff.read().shape}')
+                print(f'Upsampled {modality} tiff resolution = {tiff.res}')
+
+    def save_constants(self):
+        with open('constants.yaml', 'w') as yaml_file:
+            constants = {**{f'{modality}_res_x': self.data[modality]['res_y'] for modality in self.modalities},
+                         **{f'{modality}_interval': self.data[modality]['interval'] for modality in self.modalities},
+                         **{'num_cols_in_tiling': int(self.data['thermal']['orthomosaic'].shape[1]/self.data['thermal']['interval'])}}
+
+            yaml.dump(constants, yaml_file, default_flow_style=False)
+
+        print('Constants saved as YAML')
 
 if __name__ == '__main__':
     AlignOrthomosaics(site=sys.argv[1])
