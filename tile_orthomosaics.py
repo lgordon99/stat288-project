@@ -9,75 +9,93 @@ import utils
 class TileOrthomosaics:
     def __init__(self, site):
         self.site_dir = utils.get_site_dir(site)
+        self.modalities = ['thermal', 'rgb', 'lidar']
         self.constants = utils.process_yaml('constants.yaml')
+        self.data = {}
 
-        # create tiles
-        self.thermal_tiles = self.tile('thermal')
-        print('Created thermal tiles')
-        self.rgb_tiles = self.tile('rgb')
-        print('Created RGB tiles')
-        self.lidar_tiles = self.tile('lidar')
-        print('Created LiDAR tiles')
+        for modality in self.modalities:
+            self.data[modality], self.data['grayscale'] = {}, {}
+            self.data[modality]['tiles'] = self.tile(array_path=f'{self.site_dir}/orthomosaics/{modality}_orthomosaic.npy',
+                                                     interval=self.constants[f'{modality}_interval'])
+            print(f'Generated {modality} tiles')
 
-        self.identifiers = list(range(len(self.thermal_tiles)))
-        self.max_pixel_vals = [np.max(thermal_tile) for thermal_tile in self.thermal_tiles]
+            self.data[modality]['upsampled_tiles'] = self.tile(array_path=f'{self.site_dir}/upsampled_orthomosaics/{modality}_upsampled_orthomosaic.npy',
+                                                               interval=self.constants['upsampled_interval'])
+            print(f'Generated {modality} upsampled tiles')
+
+        self.data['grayscale']['upsampled_tiles'] = self.tile(array_path=f'{self.site_dir}/upsampled_orthomosaics/grayscale_upsampled_orthomosaic.npy',
+                                                              interval=self.constants['upsampled_interval'])
         
+        self.identifiers = list(range(len(self.data['thermal']['tiles'])))
+        print(f'Identifiers length = {len(self.identifiers)}')
+        self.identifier_matrix = np.zeros((self.constants['num_rows_in_tiling'], self.constants['num_cols_in_tiling']))
+
+        for row in range(self.constants['num_rows_in_tiling']):
+            for col in range(self.constants['num_cols_in_tiling']):
+                self.identifier_matrix[row][col] = self.identifiers[row*self.constants['num_cols_in_tiling'] + col]
+
+        np.save(f'{self.site_dir}/identifiers', self.identifiers)
+        np.save(f'{self.site_dir}/identifier_matrix', self.identifier_matrix)
+
         self.remove_empty_tiles()
-        print('Removed empty tiles')
+        self.save_tiles()
+        # self.generate_png_tiles()
 
-        # save tiles
-        os.makedirs(f'{self.site_dir}/tiles', exist_ok=True)
-        np.save(f'{self.site_dir}/tiles/thermal_tiles', self.thermal_tiles)
-        np.save(f'{self.site_dir}/tiles/rgb_tiles', self.rgb_tiles)
-        np.save(f'{self.site_dir}/tiles/lidar_tiles', self.lidar_tiles)
-        print('Tiles saved')
-
-        # create PNG tiles
-        self.png_tile(self.thermal_tiles, 'thermal')
-        print('Created thermal PNG tiles')
-        self.png_tile(self.rgb_tiles, 'rgb')
-        print('Created RGB PNG tiles')
-        self.png_tile(self.lidar_tiles, 'lidar')
-        print('Created LiDAR PNG tiles')
-
-    def tile(self, modality):
-        band = np.load(f'{self.site_dir}/bands/{modality}_bands.npy') if modality == 'rgb' else np.load(f'{self.site_dir}/bands/{modality}_band.npy') 
-        interval = self.constants[f'{modality}_interval']
+    def tile(self, array_path, interval):
+        array = np.load(array_path)
         tiles = []
 
-        for top in range(0, band.shape[0], interval):
-            for left in range(0, band.shape[1], interval):
-                tiles.append(band[top : top + interval, left : left + interval])
+        for top in range(0, array.shape[0], interval):
+            for left in range(0, array.shape[1], interval):
+                tiles.append(array[top : top + interval, left : left + interval])
 
         return tiles
 
     def remove_empty_tiles(self):
         for i in reversed(range(len(self.identifiers))):
-            if np.all(self.thermal_tiles[i] == 0) or np.all(self.rgb_tiles[i] == 0) or np.all(self.lidar_tiles[i] == 0):
-                del self.thermal_tiles[i]
-                del self.rgb_tiles[i]
-                del self.lidar_tiles[i]
+            if np.all(self.data['thermal']['tiles'][i] == 0) or np.all(self.data['rgb']['tiles'][i] == 0) or np.all(self.data['lidar']['tiles'][i] == 0):
+                for modality in self.modalities:
+                    del self.data[modality]['tiles'][i]
+                    del self.data[modality]['upsampled_tiles'][i]
+                
+                del self.data['grayscale']['upsampled_tiles'][i]
                 del self.identifiers[i]
-                del self.max_pixel_vals[i]
+        
+        print('Removed empty tiles')
 
-    def png_tile(self, tiles, modality):
-        png_tiles = []
+    def save_tiles(self):
+        os.makedirs(f'{self.site_dir}/tiles', exist_ok=True)
+        os.makedirs(f'{self.site_dir}/upsampled_tiles', exist_ok=True)
 
-        for i in range(len(tiles)):
-            plt.figure(dpi=60.7) # dpi=60.7 to get resultant arrays of (224,224,3)
-            image = plt.imshow(tiles[i]) # plot the array of pixel values as an image
+        for modality in self.modalities:
+            np.save(f'{self.site_dir}/tiles/{modality}_tiles', self.data[modality]['tiles'])
+            np.save(f'{self.site_dir}/upsampled_tiles/{modality}_upsampled_tiles', self.data[modality]['upsampled_tiles'])
 
-            if modality == 'thermal' or modality == 'lidar':
-                image.set_cmap('inferno')
-            
-            plt.axis('off') # remove axes
-            os.makedirs(f'{self.site_dir}/png_images/{modality}', exist_ok=True)
-            plt.savefig(f'{self.site_dir}/png_images/{modality}/{modality}_png_image_{self.identifiers[i]}.png', bbox_inches='tight', pad_inches=0) # temporarily save the image
-            plt.close() # close the image to save memory
-            png_tiles.append(imread(f'{self.site_dir}/png_images/{modality}/{modality}_png_image_{self.identifiers[i]}.png')) # convert the PNG image to a 3D array
+        np.save(f'{self.site_dir}/upsampled_tiles/grayscale_upsampled_tiles', self.data['grayscale']['upsampled_tiles'])
 
-        os.makedirs(f'{self.site_dir}/png_tiles/{modality}', exist_ok=True)
-        np.save(f'{self.site_dir}/png_tiles/{modality}_png_tiles', png_tiles)
+        print('Tiles and upsampled tiles saved')
+
+    def generate_png_tiles(self):
+        for modality in self.modalities:
+            png_tiles = []
+
+            for i in range(len(self.data[modality]['tiles'])):
+                plt.figure(dpi=60.7) # dpi=60.7 to get resultant arrays of (224,224,3)
+                image = plt.imshow(self.data[modality]['tiles'][i]) # plot the array of pixel values as an image
+
+                if modality == 'thermal' or modality == 'lidar':
+                    image.set_cmap('inferno')
+                
+                plt.axis('off') # remove axes
+                os.makedirs(f'{self.site_dir}/png_images/{modality}', exist_ok=True)
+                plt.savefig(f'{self.site_dir}/png_images/{modality}/{modality}_png_image_{self.identifiers[i]}.png', bbox_inches='tight', pad_inches=0) # save the tile as a PNG
+                plt.close() # close the image to save memory
+                png_tiles.append(imread(f'{self.site_dir}/png_images/{modality}/{modality}_png_image_{self.identifiers[i]}.png')) # convert the PNG image to a 3D array
+
+            os.makedirs(f'{self.site_dir}/png_tiles/{modality}', exist_ok=True)
+            np.save(f'{self.site_dir}/png_tiles/{modality}_png_tiles', png_tiles)
+
+            print(f'Generated {modality} PNG tiles')
 
 if __name__ == '__main__':
     TileOrthomosaics(site=sys.argv[1])
