@@ -1,5 +1,6 @@
 # imports
 from osgeo import gdal
+from PIL import Image
 import numpy as np
 import os
 import rasterio
@@ -23,9 +24,10 @@ class AlignOrthomosaics:
                 self.data[modality]['res_x'], self.data[modality]['res_y'] = round(self.data[modality]['res_x'], 2), round(self.data[modality]['res_y'], 2)
                 self.data[modality]['metadata'] = tiff.meta
                 self.data[modality]['orthomosaic'] = self.get_orthomosaic(modality, tiff)
-                self.data[modality]['interval'] = int(self.interval_meters / self.data[modality]['res_x'])
+                self.data[modality]['interval'] = self.get_interval(resolution=self.data[modality]['res_x'])
                 print(f'Initial {modality} orthomosaic shape = {self.data[modality]["orthomosaic"].shape}')
 
+        self.max_res = np.min([self.data[modality]['res_x'] for modality in self.modalities])
         self.tight_bounds_meters = self.get_tight_bounds_meters()
         self.crop_to_tight_bounds()
         self.pad_for_divisibility_by_interval()
@@ -33,6 +35,7 @@ class AlignOrthomosaics:
         self.save_orthomosaics_as_tiffs()
         self.upsample_tiffs()
         self.save_upsampled_orthomosaics_as_arrays()
+        self.rgb_array_to_grayscale()
         self.save_constants()
 
     def get_orthomosaic(self, modality, tiff):
@@ -49,6 +52,9 @@ class AlignOrthomosaics:
             orthomosaic[orthomosaic < 0] = 0
 
         return orthomosaic
+
+    def get_interval(self, resolution):
+        return int(self.interval_meters / resolution)
 
     def get_tight_bounds_meters(self):
         nonzero_bounds = {'pixels': {}, 'meters': {}}
@@ -69,6 +75,8 @@ class AlignOrthomosaics:
                                'bottom': np.max([nonzero_bounds['meters'][modality]['bottom'] for modality in self.modalities]),
                                'left': np.max([nonzero_bounds['meters'][modality]['left'] for modality in self.modalities]),
                                'right': np.min([nonzero_bounds['meters'][modality]['right'] for modality in self.modalities])}
+
+        print(f'Tight bounds in meters = {tight_bounds_meters}')
 
         return tight_bounds_meters
 
@@ -129,16 +137,15 @@ class AlignOrthomosaics:
 
     def upsample_tiffs(self):
         os.makedirs(f'{self.site_dir}/upsampled_tiffs', exist_ok=True)
-        max_res = np.min([self.data[modality]['res_x'] for modality in self.modalities])
 
         for modality in self.modalities:
-            if self.data[modality]['res_x'] == max_res:
+            if self.data[modality]['res_x'] == self.max_res:
                 shutil.copy(f'{self.site_dir}/aligned_tiffs/{modality}.tif', f'{self.site_dir}/upsampled_tiffs/{modality}_upsampled.tif')
             else:
                 gdal.Warp(destNameOrDestDS=f'{self.site_dir}/upsampled_tiffs/{modality}_upsampled.tif',
                           srcDSOrSrcDSTab=f'{self.site_dir}/aligned_tiffs/{modality}.tif',
-                          xRes=max_res,
-                          yRes=max_res,
+                          xRes=self.max_res,
+                          yRes=self.max_res,
                           resampleAlg='cubic',
                           srcNodata=0,
                           dstNodata=0)
@@ -157,11 +164,22 @@ class AlignOrthomosaics:
 
         print(f'Upsampled orthomosaics saved as numpy arrays')
 
+    def rgb_array_to_grayscale(self):
+        print((self.data['rgb']['orthomosaic'] == np.load(f'{self.site_dir}/upsampled_orthomosaics/rgb_upsampled_orthomosaic.npy')).all())
+
+        grayscale_orthomosaic = np.array(Image.fromarray(self.data['rgb']['orthomosaic'], 'RGB').convert('L'))
+        print(f'Grayscale orthomosaic shape = {grayscale_orthomosaic.shape}')
+        np.save(f'{self.site_dir}/upsampled_orthomosaics/grayscale_upsampled_orthomosaic', grayscale_orthomosaic)
+
     def save_constants(self):
         with open('constants.yaml', 'w') as yaml_file:
-            constants = {**{f'{modality}_res_x': self.data[modality]['res_y'] for modality in self.modalities},
+            constants = {**{f'{modality}_res_x': self.data[modality]['res_x'] for modality in self.modalities},
+                         **{f'{modality}_res_y': self.data[modality]['res_y'] for modality in self.modalities},
                          **{f'{modality}_interval': self.data[modality]['interval'] for modality in self.modalities},
-                         **{'num_cols_in_tiling': int(self.data['thermal']['orthomosaic'].shape[1]/self.data['thermal']['interval'])}}
+                         **{'num_rows_in_tiling': int(self.data['thermal']['orthomosaic'].shape[0] / self.data['thermal']['interval']),
+                            'num_cols_in_tiling': int(self.data['thermal']['orthomosaic'].shape[1] / self.data['thermal']['interval']),
+                            'upsampled_interval': self.get_interval(resolution=self.max_res)},
+                            'tight_bounds_meters': {key: float(value) for key, value in self.tight_bounds_meters.items()}}
 
             yaml.dump(constants, yaml_file, default_flow_style=False)
 
