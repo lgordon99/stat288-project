@@ -3,6 +3,7 @@
 # imports
 import matplotlib.pyplot as plt
 import numpy as np
+import pyproj
 import yaml
 
 # functions
@@ -90,6 +91,22 @@ def get_bounds_pixels(bounds_meters, origin, res):
     right_pixels = meters_to_pixels(origin[0], right_meters, res[0])
 
     return [top_pixels, bottom_pixels, left_pixels, right_pixels]
+
+def get_utm_zone(longitude):
+    ''' Calculates the UTM zone number for a given longitude '''
+
+    return int((longitude + 180) // 6) + 1
+
+def latlon_to_utm(lat, lon):
+    ''' Converts latitude and longitude to UTM coordinates '''
+
+    utm_zone = get_utm_zone(lon)
+    hemisphere_prefix = 327 if lat < 0 else 326 # if latitude is below zero, it's in the southern hemisphere
+    epsg_code = f'epsg:{hemisphere_prefix}{utm_zone}'
+    transformer = pyproj.Transformer.from_crs('epsg:4326', epsg_code, always_xy=True)
+    utm_easting, utm_northing = transformer.transform(lon, lat)    
+    
+    return utm_easting, utm_northing
 
 def plot_array(array, png_path):
     '''Plots an array as a PNG'''
