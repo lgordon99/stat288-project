@@ -176,7 +176,8 @@ class AlignOrthomosaics:
             constants = {**{f'{modality}_res_x': self.data[modality]['res_x'] for modality in self.modalities},
                          **{f'{modality}_res_y': self.data[modality]['res_y'] for modality in self.modalities},
                          **{f'{modality}_interval': self.data[modality]['interval'] for modality in self.modalities},
-                         **{'num_rows_in_tiling': int(self.data['thermal']['orthomosaic'].shape[0] / self.data['thermal']['interval']),
+                         **{'interval_meters': self.interval_meters,
+                            'num_rows_in_tiling': int(self.data['thermal']['orthomosaic'].shape[0] / self.data['thermal']['interval']),
                             'num_cols_in_tiling': int(self.data['thermal']['orthomosaic'].shape[1] / self.data['thermal']['interval']),
                             'upsampled_interval': self.get_interval(resolution=self.max_res)},
                             'tight_bounds_meters': {key: float(value) for key, value in self.tight_bounds_meters.items()}}
