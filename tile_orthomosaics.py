@@ -1,5 +1,6 @@
 # imports
 from cv2 import imread
+from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -27,19 +28,19 @@ class TileOrthomosaics:
                                                               interval=self.constants['upsampled_interval'])
         
         self.identifiers = list(range(len(self.data['thermal']['tiles'])))
-        print(f'Identifiers length = {len(self.identifiers)}')
-        self.identifier_matrix = np.zeros((self.constants['num_rows_in_tiling'], self.constants['num_cols_in_tiling']))
+        self.identifier_matrix = np.zeros((self.constants['num_rows_in_tiling'], self.constants['num_cols_in_tiling']), dtype=np.int_)
 
         for row in range(self.constants['num_rows_in_tiling']):
             for col in range(self.constants['num_cols_in_tiling']):
                 self.identifier_matrix[row][col] = self.identifiers[row*self.constants['num_cols_in_tiling'] + col]
 
-        np.save(f'{self.site_dir}/identifiers', self.identifiers)
-        np.save(f'{self.site_dir}/identifier_matrix', self.identifier_matrix)
-
         self.remove_empty_tiles()
         self.save_tiles()
-        # self.generate_png_tiles()
+        self.generate_png_tiles()
+        self.generate_fused_tiles()
+        
+        np.save(f'{self.site_dir}/identifiers', self.identifiers)
+        np.save(f'{self.site_dir}/identifier_matrix', self.identifier_matrix)
 
     def tile(self, array_path, interval):
         array = np.load(array_path)
@@ -77,6 +78,8 @@ class TileOrthomosaics:
 
     def generate_png_tiles(self):
         for modality in self.modalities:
+            os.makedirs(f'{self.site_dir}/png_images/{modality}', exist_ok=True)
+
             png_tiles = []
 
             for i in range(len(self.data[modality]['tiles'])):
@@ -87,15 +90,31 @@ class TileOrthomosaics:
                     image.set_cmap('inferno')
                 
                 plt.axis('off') # remove axes
-                os.makedirs(f'{self.site_dir}/png_images/{modality}', exist_ok=True)
                 plt.savefig(f'{self.site_dir}/png_images/{modality}/{modality}_png_image_{self.identifiers[i]}.png', bbox_inches='tight', pad_inches=0) # save the tile as a PNG
                 plt.close() # close the image to save memory
                 png_tiles.append(imread(f'{self.site_dir}/png_images/{modality}/{modality}_png_image_{self.identifiers[i]}.png')) # convert the PNG image to a 3D array
 
-            os.makedirs(f'{self.site_dir}/png_tiles/{modality}', exist_ok=True)
             np.save(f'{self.site_dir}/png_tiles/{modality}_png_tiles', png_tiles)
 
             print(f'Generated {modality} PNG tiles')
+
+    def generate_fused_tiles(self):
+        os.makedirs(f'{self.site_dir}/fused_images', exist_ok=True)
+
+        fused_tiles = []
+
+        for i in range(len(self.data['thermal']['tiles'])):
+            thermal_image = Image.open(f'{self.site_dir}/png_images/thermal/thermal_png_image_{self.identifiers[i]}.png')
+            rgb_image = Image.open(f'{self.site_dir}/png_images/rgb/rgb_png_image_{self.identifiers[i]}.png')
+            thermal_rgb_fused_image = Image.blend(thermal_image, rgb_image, 1/2)
+            lidar_image = Image.open(f'{self.site_dir}/png_images/lidar/lidar_png_image_{self.identifiers[i]}.png')
+            fused_image = Image.blend(thermal_rgb_fused_image, lidar_image, 1/3)
+            fused_image.save(f'{self.site_dir}/fused_images/fused_image_{self.identifiers[i]}.png', 'PNG')
+            fused_tiles.append(imread(f'{self.site_dir}/fused_images/fused_image_{self.identifiers[i]}.png'))
+        
+        np.save(f'{self.site_dir}/fused_tiles', fused_tiles)
+        
+        print(f'Generated fused tiles')
 
 if __name__ == '__main__':
     TileOrthomosaics(site=sys.argv[1])
