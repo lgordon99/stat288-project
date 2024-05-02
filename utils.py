@@ -108,11 +108,42 @@ def latlon_to_utm(lat, lon):
     
     return utm_easting, utm_northing
 
-def plot_array(array, png_path):
+def get_tile(identifier):
+    constants = process_yaml('constants.yaml')
+    num_cols_in_tiling = constants['num_cols_in_tiling']
+
+    row = int(np.floor(identifier / num_cols_in_tiling))
+    col = int(identifier - num_cols_in_tiling*np.floor(identifier / num_cols_in_tiling))
+
+    return row, col
+
+def get_tile_center_pixels(identifier, modality):
+    constants = process_yaml('constants.yaml')
+    interval = constants[f'{modality}_interval']    
+    row, col = get_tile(identifier)
+    x = int(col*interval + interval/2)
+    y = int(row*interval + interval/2)
+
+    return y, x
+
+def get_tile_center_meters(identifier):
+    constants = process_yaml('constants.yaml')
+    interval = constants['interval_meters']    
+    row, col = get_tile(identifier)
+    x = constants['tight_bounds_meters']['left'] + col*interval + interval/2
+    y = constants['tight_bounds_meters']['top'] - row*interval - interval/2
+
+    return y, x
+
+def plot_array(array, png_path, modality):
     '''Plots an array as a PNG'''
 
     plt.figure(dpi=300)
-    plt.imshow(array) # plot the array of pixel values as an image
+    image = plt.imshow(array) # plot the array of pixel values as an image
+    
+    if modality == 'thermal' or modality == 'lidar':
+        image.set_cmap('inferno')
+
     plt.axis('off') # remove axes        
     plt.savefig(png_path, bbox_inches='tight', pad_inches=0)
     plt.close() # close the image to save memory
