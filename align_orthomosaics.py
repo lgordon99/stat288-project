@@ -109,6 +109,7 @@ class AlignOrthomosaics:
 
         for modality in self.modalities:
             np.save(f'{self.site_dir}/orthomosaics/{modality}_orthomosaic', self.data[modality]['orthomosaic'])
+
         print(f'Orthomosaics saved as numpy arrays')
 
     def array_to_tiff(self, modality):
@@ -160,6 +161,10 @@ class AlignOrthomosaics:
         for modality in self.modalities:
             with rasterio.open(f'{self.site_dir}/upsampled_tiffs/{modality}_upsampled.tif') as tiff:
                 upsampled_orthomosaic = tiff.read(1) if tiff.count == 1 else tiff.read().transpose(1, 2, 0)
+
+                if np.min(upsampled_orthomosaic) < 0:
+                    upsampled_orthomosaic[upsampled_orthomosaic != 0] -= np.min(upsampled_orthomosaic)
+
                 np.save(f'{self.site_dir}/upsampled_orthomosaics/{modality}_upsampled_orthomosaic', upsampled_orthomosaic)
 
         print(f'Upsampled orthomosaics saved as numpy arrays')
