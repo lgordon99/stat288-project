@@ -26,7 +26,7 @@ class TileOrthomosaics:
 
         self.data['grayscale']['upsampled_tiles'] = self.tile(array_path=f'{self.site_dir}/upsampled_orthomosaics/grayscale_upsampled_orthomosaic.npy',
                                                               interval=self.constants['upsampled_interval'])
-        
+
         self.identifiers = list(range(len(self.data['thermal']['tiles'])))
         self.identifier_matrix = np.zeros((self.constants['num_rows_in_tiling'], self.constants['num_cols_in_tiling']), dtype=np.int_)
 
@@ -38,7 +38,7 @@ class TileOrthomosaics:
         self.save_tiles()
         self.generate_png_tiles()
         self.generate_fused_tiles()
-        
+
         np.save(f'{self.site_dir}/identifiers', self.identifiers)
         np.save(f'{self.site_dir}/identifier_matrix', self.identifier_matrix)
 
@@ -58,10 +58,10 @@ class TileOrthomosaics:
                 for modality in self.modalities:
                     del self.data[modality]['tiles'][i]
                     del self.data[modality]['upsampled_tiles'][i]
-                
+
                 del self.data['grayscale']['upsampled_tiles'][i]
                 del self.identifiers[i]
-        
+
         print('Removed empty tiles')
 
     def save_tiles(self):
@@ -88,7 +88,7 @@ class TileOrthomosaics:
 
                 if modality == 'thermal' or modality == 'lidar':
                     image.set_cmap('inferno')
-                
+
                 plt.axis('off') # remove axes
                 plt.savefig(f'{self.site_dir}/png_images/{modality}/{modality}_png_image_{self.identifiers[i]}.png', bbox_inches='tight', pad_inches=0) # save the tile as a PNG
                 plt.close() # close the image to save memory
@@ -111,9 +111,9 @@ class TileOrthomosaics:
             fused_image = Image.blend(thermal_rgb_fused_image, lidar_image, 1/3)
             fused_image.save(f'{self.site_dir}/fused_images/fused_image_{self.identifiers[i]}.png', 'PNG')
             fused_tiles.append(imread(f'{self.site_dir}/fused_images/fused_image_{self.identifiers[i]}.png'))
-        
+
         np.save(f'{self.site_dir}/fused_tiles', fused_tiles)
-        
+
         print(f'Generated fused tiles')
 
 if __name__ == '__main__':
