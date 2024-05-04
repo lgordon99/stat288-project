@@ -8,6 +8,25 @@ import torch
 import torch.nn as nn
 import utils
 
+class LateFusionModel(nn.Module):
+    def __init__(self, num_classes, num_models=3, num_features_extracted=256):
+        super().__init__() # initializes nn.Module class
+
+        self.models = nn.ModuleList([resnet50(weights='DEFAULT') for _ in range(num_models)])
+
+        for model in self.models:
+            num_features = model.fc.in_features # input to final layer
+            model.fc = nn.Linear(num_features, num_features_extracted)
+
+        self.fusion_layer = nn.Linear(num_models*num_features_extracted, num_classes)
+
+    def forward(self, inputs):
+        features_extracted = [self.models[i](inputs[:, i, :, :, :]) for i in range(inputs.shape[1])]
+        concatenated_features = torch.cat(features_extracted, dim=1)
+        output = self.fusion_layer(concatenated_features)
+
+        return output
+
 class CNN:
     def __init__(self, setting, site):
         self.site_dir = utils.get_site_dir(site)
@@ -17,10 +36,11 @@ class CNN:
         self.identifier_matrix = np.load(f'{self.site_dir}/identifier_matrix.npy')
         self.labels = np.load(f'{self.site_dir}/labels.npy') 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.train_batch_size = 32
-        self.epochs = 10
+        self.batch_size = 64
+        self.epochs = 20
         self.criterion = nn.CrossEntropyLoss()
 
+        print(f'Using {torch.cuda.device_count()} GPU(s)')
         print(f'Identifiers length = {len(self.identifiers)}')
         print(f'Identifier matrix shape = {self.identifier_matrix.shape}')
         print(f'Labels length = {len(self.labels)}')
@@ -51,64 +71,52 @@ class CNN:
         print(f'Test indices length = {len(test_indices)}')
 
         if setting == 'original':
-            thermal_tiles = np.load(f'{self.site_dir}/tiles/thermal_tiles.npy')
-            rgb_tiles = np.load(f'{self.site_dir}/tiles/rgb_tiles.npy')
-            lidar_tiles = np.load(f'{self.site_dir}/tiles/lidar_tiles.npy')
-
-            tripled_thermal_tiles = np.concatenate(([thermal_tiles], [thermal_tiles], [thermal_tiles])).transpose(1, 0, 2, 3)
-            tripled_lidar_tiles = np.concatenate(([lidar_tiles], [lidar_tiles], [lidar_tiles])).transpose(1, 0, 2, 3)
-
-            tiles = [tripled_thermal_tiles] + [rgb_tiles.transpose(0, 3, 1, 2)] + [tripled_lidar_tiles]
+            tiles = np.array([np.load(f'{self.site_dir}/upsampled_tiles/{modality}_upsampled_tiles.npy') if modality == 'rgb' else np.repeat(np.load(f'{self.site_dir}/upsampled_tiles/{modality}_upsampled_tiles.npy')[:, :, :, np.newaxis], 3, axis=3) for modality in ['thermal', 'rgb', 'lidar']]).transpose(1, 0, 4, 2, 3) # (5413, 3, 3, 400, 400)
+            model = LateFusionModel(num_classes=len(self.classes))
         elif setting == 'png':
-            thermal_tiles = np.load(f'{self.site_dir}/png_tiles/thermal_png_tiles.npy')
-            rgb_tiles = np.load(f'{self.site_dir}/png_tiles/rgb_png_tiles.npy')
-            lidar_tiles = np.load(f'{self.site_dir}/png_tiles/lidar_png_tiles.npy')
-
-            tiles = np.concatenate(([thermal_tiles], [rgb_tiles], [lidar_tiles])).transpose(0, 1, 4, 2, 3) # (3, 5413, 3, 224, 224)
-            print(tiles.shape)
+            tiles = np.array([np.load(f'{self.site_dir}/png_tiles/{modality}_png_tiles.npy') for modality in ['thermal', 'rgb', 'lidar']]).transpose(1, 0, 4, 2, 3) # (5413, 3, 3, 224, 224)
+            model = LateFusionModel(num_classes=len(self.classes))
         elif setting == 'fuse':
-            fused_tiles = np.load(f'{self.site_dir}/fused_tiles.npy')
-            tiles = np.array([fused_tiles.transpose(0, 3, 1, 2)]) # (1, 5413, 3, 224, 224)
+            tiles = np.array([np.load(f'{self.site_dir}/fused_tiles.npy')]).transpose(1, 0, 4, 2, 3) # (5413, 1, 3, 224, 224)
+            model = self.three_channel_model()
         elif setting == 'three_channel':
-            thermal_tiles = np.load(f'{self.site_dir}/upsampled_tiles/thermal_upsampled_tiles.npy')
-            rgb_tiles = np.load(f'{self.site_dir}/upsampled_tiles/grayscale_upsampled_tiles.npy')
-            lidar_tiles = np.load(f'{self.site_dir}/upsampled_tiles/lidar_upsampled_tiles.npy')
-
-            tiles = np.array([np.concatenate(([thermal_tiles], [rgb_tiles], [lidar_tiles])).transpose(1, 0, 2, 3)]) # (1, 5413, 3, 400, 400)
+            tiles = np.array([[np.load(f'{self.site_dir}/upsampled_tiles/{modality}_upsampled_tiles.npy') for modality in ['thermal', 'grayscale', 'lidar']]]).transpose(2, 0, 1, 3, 4) # (5413, 1, 3, 400, 400)
+            model = self.three_channel_model()
         elif setting == 'five_channel':
             thermal_tiles = np.load(f'{self.site_dir}/upsampled_tiles/thermal_upsampled_tiles.npy')
             rgb_tiles = np.load(f'{self.site_dir}/upsampled_tiles/rgb_upsampled_tiles.npy')
             lidar_tiles = np.load(f'{self.site_dir}/upsampled_tiles/lidar_upsampled_tiles.npy')
-            tiles = np.array([np.concatenate(([thermal_tiles], rgb_tiles.transpose(3, 0, 1, 2), [lidar_tiles])).transpose(1, 0, 2, 3)]) # (1, 5413, 5, 400, 400)
-            print(tiles.shape)
-        
-        print(f'Using {torch.cuda.device_count()} GPU(s)')
-        model = self.three_channel_model()
+            tiles = np.array([np.concatenate(([thermal_tiles], rgb_tiles.transpose(3, 0, 1, 2), [lidar_tiles])).transpose(1, 0, 2, 3)]) # (1, 5413, 5, 400, 400)        
 
-        train_images = np.squeeze(np.take(tiles, train_indices, axis=1), axis=2) # (num models, num train images, 3, 224, 224)
-        test_images = np.squeeze(np.take(tiles, test_indices, axis=1), axis=2) # (num models, num test images, 3, 224, 224)
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
 
-        train_means, train_stds = np.zeros((train_images.shape[0], train_images.shape[2])), np.zeros((train_images.shape[0], train_images.shape[2]))
+        model.to(self.device)
 
-        for i, model_images in enumerate(train_images):
-            train_means[i] = np.mean(model_images, axis=(0, 2, 3))
-            train_stds[i] = np.std(model_images, axis=(0, 2, 3))
+        train_images = tiles[train_indices].squeeze(axis=1) # (num train images, num models, 3, 224, 224)
+        test_images = tiles[test_indices].squeeze(axis=1) # (num test images, num models, 3, 224, 224)
+
+        train_means, train_stds = np.zeros((train_images.shape[1], train_images.shape[2])), np.zeros((train_images.shape[1], train_images.shape[2]))
+
+        for i in range(train_images.shape[1]):
+            train_means[i] = np.mean(train_images[:, i, :, :, :], axis=(0, 2, 3))
+            train_stds[i] = np.std(train_images[:, i, :, :, :], axis=(0, 2, 3))
 
         print(train_means)
         print(train_stds)
 
-        for i in range(len(train_images)):
-            train_images[i] = train_images[i] - train_means[i].reshape(1,3,1,1) / train_stds[i].reshape(1,3,1,1)
-            test_images[i] = test_images[i] - train_means[i].reshape(1,3,1,1) / train_stds[i].reshape(1,3,1,1)
+        for i in range(train_images.shape[1]):
+            train_images[:, i, :, :, :] = train_images[:, i, :, :, :] - train_means[i].reshape(1, 3, 1, 1) / train_stds[i].reshape(1, 3, 1, 1)
+            test_images[:, i, :, :, :] = test_images[:, i, :, :, :] - train_means[i].reshape(1, 3, 1, 1) / train_stds[i].reshape(1, 3, 1, 1)
 
         print(f'Train images shape = {train_images.shape}')
         print(f'Test images shape = {test_images.shape}')
 
-        train_loader = [self.make_loader(model_images, train_labels, train_identifiers, self.train_batch_size) for model_images in train_images]
-        test_loader = [self.make_loader(model_images, test_labels, test_identifiers, self.train_batch_size) for model_images in test_images]
+        train_loader = self.make_loader(train_images, train_labels, train_identifiers, self.batch_size)
+        test_loader = self.make_loader(test_images, test_labels, test_identifiers, self.batch_size)
 
-        self.passive_train(model, train_loader[0])
-        self.test(model, test_loader[0])
+        self.passive_train(model, train_loader)
+        self.test(model, test_loader)
 
     def get_identifier_label(self, identifier):
         index = np.where(self.identifiers == identifier)[0][0]
@@ -117,29 +125,11 @@ class CNN:
         return label        
 
     def three_channel_model(self):
-        model = resnet50(weights='DEFAULT') # imports a ResNet-50 CNN pretrained on ImageNet-1k v2
-
-        # for parameter in model.parameters(): # freeze all parameters
-        #     parameter.requires_grad = False
-        
+        model = resnet50(weights='DEFAULT') # imports a ResNet-50 CNN pretrained on ImageNet-1k v2        
         num_features = model.fc.in_features # input to final layer
         model.fc = nn.Linear(num_features, len(self.classes)) # unfreezes the parameters in the final layer and sets the output size to the number of classes
-        model.to(self.device)
-        # print(summary(model, (3, 224, 224)))
-        model.eval()
+
         return model
-
-    def late_fusion_model(self):
-        models = [resnet50(weights='DEFAULT') for _ in range(3)]
-
-        for model in models:
-            num_features = model.fc.in_features # input to final layer
-            model.fc = nn.Linear(num_features, 256)
-        
-        fusion_fc = nn.Linear(3*256, len(self.classes))
-
-        for model in models:
-            model.to(self.device)
 
     def make_loader(self, images, labels, identifiers, batch_size):
         data = list(map(list, zip(images, labels, identifiers))) # each image gets grouped with its label and identifier
@@ -166,7 +156,7 @@ class CNN:
                 image_batch.append(data[i][0])
                 label_batch.append(data[i][1])
                 identifier_batch.append(data[i][2])
-        
+
         return loader
 
     def passive_train(self, model, train_loader):
@@ -180,17 +170,16 @@ class CNN:
                 images = train_loader[batch]['images'].to(self.device)
                 labels = train_loader[batch]['labels'].to(self.device)
                 optimizer.zero_grad() # zero the parameter gradients
-                outputs = model(images) # forward pass
+                outputs = model(images.squeeze(axis=1)) if images.shape[1] == 1 else model(images) # forward pass
                 loss = self.criterion(outputs, labels) # mean loss per item in batch
                 loss.backward() # backward pass
                 optimizer.step() # optimization
                 epoch_loss += loss.item()
-
+                torch.cuda.empty_cache()
             print(f'Epoch {epoch+1} loss = {round(epoch_loss, 3)}')
 
-        model.eval()
-
     def test(self, model, test_loader):
+        model.eval()
         y_true = torch.tensor([], dtype=torch.long, device=self.device)
         probabilities = torch.tensor([], dtype=torch.long, device=self.device)
 
@@ -198,7 +187,7 @@ class CNN:
             for batch in test_loader:
                 images = test_loader[batch]['images'].to(self.device)
                 labels = test_loader[batch]['labels'].to(self.device)
-                outputs = model(images) # forward pass
+                outputs = model(images.squeeze(axis=1)) if images.shape[1] == 1 else model(images) # forward pass
                 batch_probabilities = torch.nn.functional.softmax(outputs, dim=1) # applies softmax to the logits
 
                 y_true = torch.cat((y_true, labels), dim=0)
@@ -222,7 +211,7 @@ class CNN:
 
 if __name__ == '__main__':
     # CNN(setting='fuse', site='firestorm-3')
-    CNN(setting='three_channel', site='firestorm-3')
+    # CNN(setting='three_channel', site='firestorm-3')
     # CNN(setting='png', site='firestorm-3')
-    # CNN(setting='original', site='firestorm-3')
+    CNN(setting='original', site='firestorm-3')
     # CNN(setting='five_channel', site='firestorm-3')
