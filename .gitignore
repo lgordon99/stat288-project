@@ -1,3 +1,6 @@
 __pycache__
 *.yaml
 *.png
+bash-errors
+bash-outputs
+results
