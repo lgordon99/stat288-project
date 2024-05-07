@@ -105,7 +105,7 @@ def latlon_to_utm(lat, lon):
     epsg_code = f'epsg:{hemisphere_prefix}{utm_zone}'
     transformer = pyproj.Transformer.from_crs('epsg:4326', epsg_code, always_xy=True)
     utm_easting, utm_northing = transformer.transform(lon, lat)    
-    
+
     return utm_easting, utm_northing
 
 def get_tile(identifier):
@@ -140,9 +140,11 @@ def plot_array(array, png_path, modality):
 
     plt.figure(dpi=300)
     image = plt.imshow(array) # plot the array of pixel values as an image
-    
+
     if modality == 'thermal' or modality == 'lidar':
         image.set_cmap('inferno')
+    elif modality != 'rgb':
+        image.set_cmap('gray')
 
     plt.axis('off') # remove axes        
     plt.savefig(png_path, bbox_inches='tight', pad_inches=0)
